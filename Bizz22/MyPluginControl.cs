@@ -1,7 +1,10 @@
 ﻿using McTools.Xrm.Connection;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
+using Rappen.XRM.Helpers.Extensions;
+using Rappen.XTB.Helpers.Extensions;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -16,92 +19,138 @@ namespace Bizz22
 {
     public partial class MyPluginControl : PluginControlBase
     {
-        private Settings mySettings;
-
         public MyPluginControl()
         {
             InitializeComponent();
         }
 
-        private void MyPluginControl_Load(object sender, EventArgs e)
+        private void MyPluginControl_ConnectionUpdated(object sender, ConnectionUpdatedEventArgs e)
         {
-            ShowInfoNotification("This is a notification that can lead to XrmToolBox repository", new Uri("https://github.com/MscrmTools/XrmToolBox"));
-
-            // Loads or creates the settings for the plugin
-            if (!SettingsManager.Instance.TryLoad(GetType(), out mySettings))
-            {
-                mySettings = new Settings();
-
-                LogWarning("Settings not found => a new settings file has been created!");
-            }
-            else
-            {
-                LogInfo("Settings found and loaded");
-            }
+            xrmView.Service = e.Service;
+            xrmData.Service = e.Service;
+            xrmRecordHost1.Service = e.Service;
+            GetEntities();
         }
 
-        private void tsbClose_Click(object sender, EventArgs e)
+        private void GetEntities()
         {
-            CloseTool();
+            // A bit faster
+            xrmTable.DataSource = Service.LoadEntities().EntityMetadata
+                .Where(e => e.IsManaged.Value == false || chkManaged.Checked);
+
+            // A bit better
+            //this.GetAllEntityMetadatas((em) =>
+            //{
+            //    xrmEntityComboBox1.DataSource = em
+            //      .Where(e => e.IsManaged.Value == false || checkBox1.Checked);;
+            //});
         }
 
-        private void tsbSample_Click(object sender, EventArgs e)
+        private void chkManaged_CheckedChanged(object sender, EventArgs e)
         {
-            // The ExecuteMethod method handles connecting to an
-            // organization if XrmToolBox is not yet connected
-            ExecuteMethod(GetAccounts);
+            GetEntities();
         }
 
-        private void GetAccounts()
+        private void xrmTable_SelectedIndexChanged(object sender, EventArgs e)
         {
+            GetViews();
+        }
+
+        private void GetViews()
+        {
+            var entity = xrmTable.SelectedEntity;
+            xrmPrimaryName.Column = entity?.PrimaryNameAttribute;
+
+            if (entity == null) { return; }
+
+            var query_statecode = 0;
+            var query = new QueryExpression("savedquery");
+            query.ColumnSet.AddColumns("name", "fetchxml", "layoutxml");
+            query.Criteria.AddCondition("statecode", ConditionOperator.Equal, query_statecode);
+            query.Criteria.AddCondition("fetchxml", ConditionOperator.NotNull);
+            query.Criteria.AddCondition("returnedtypecode", ConditionOperator.Equal, entity.LogicalName);
+
             WorkAsync(new WorkAsyncInfo
             {
-                Message = "Getting accounts",
+                Message = "Loading Views..",
                 Work = (worker, args) =>
                 {
-                    args.Result = Service.RetrieveMultiple(new QueryExpression("account")
-                    {
-                        TopCount = 50
-                    });
+                    args.Result = Service.RetrieveMultiple(query);
                 },
                 PostWorkCallBack = (args) =>
                 {
-                    if (args.Error != null)
+                    ShowErrorDialog(args.Error);
+                    if (args.Error == null && args.Result is EntityCollection views)
                     {
-                        MessageBox.Show(args.Error.ToString(), "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
-                    var result = args.Result as EntityCollection;
-                    if (result != null)
-                    {
-                        MessageBox.Show($"Found {result.Entities.Count} accounts");
+                        xrmView.DataSource = views;
                     }
                 }
             });
         }
 
-        /// <summary>
-        /// This event occurs when the plugin is closed
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void MyPluginControl_OnCloseTool(object sender, EventArgs e)
+        private void xrmView_SelectedIndexChanged(object sender, EventArgs e)
         {
-            // Before leaving, save the settings
-            SettingsManager.Instance.Save(GetType(), mySettings);
+            GetData();
         }
 
-        /// <summary>
-        /// This event occurs when the connection has been updated in XrmToolBox
-        /// </summary>
-        public override void UpdateConnection(IOrganizationService newService, ConnectionDetail detail, string actionName, object parameter)
+        private void GetData()
         {
-            base.UpdateConnection(newService, detail, actionName, parameter);
+            var fetch = xrmView.SelectedRecord?.GetAttributeValue<string>("fetchxml");
+            var layout = xrmView.SelectedRecord?.GetAttributeValue<string>("layoutxml");
+            if (string.IsNullOrEmpty(fetch)) { return; }
 
-            if (mySettings != null && detail != null)
+            WorkAsync(new WorkAsyncInfo
             {
-                mySettings.LastUsedOrganizationWebappUrl = detail.WebApplicationUrl;
-                LogInfo("Connection has changed to: {0}", detail.WebApplicationUrl);
-            }
+                Message = "Loading Data..",
+                Work = (worker, args) =>
+                {
+                    xrmData.SetDataSource(fetch, layout);
+                    //          args.Result = Service.RetrieveMultiple(new FetchExpression(fetch));
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    ShowErrorDialog(args.Error);
+                    if (args.Error == null && args.Result is EntityCollection views)
+                    {
+                        xrmData.DataSource = views;
+                    }
+                }
+            });
+        }
+
+        private void chkFriendly_CheckedChanged(object sender, EventArgs e)
+        {
+            xrmData.ShowFriendlyNames = chkFriendly.Checked;
+        }
+
+        private void xrmData_RecordClick(object sender, Rappen.XTB.Helpers.Controls.XRMRecordEventArgs e)
+        {
+            xrmRecordHost1.Record = e.Entity;
+        }
+
+        private void btnSave_Click(object sender, EventArgs e)
+        {
+            Save();
+        }
+
+        private void Save()
+        {
+            WorkAsync(new WorkAsyncInfo
+            {
+                Message = "Saving...",
+                Work = (work, args) =>
+                {
+                    args.Result = xrmRecordHost1.SaveChanges();
+                },
+                PostWorkCallBack = (args) =>
+                {
+                    ShowErrorDialog(args.Error);
+                    if (args.Error == null && args.Result is bool result && result)
+                    {
+                        GetData();
+                    }
+                }
+            });
         }
     }
 }
